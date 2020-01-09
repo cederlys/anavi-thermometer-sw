@@ -1218,6 +1218,8 @@ void loop()
 
         if (!isnan(humidity) && !isnan(temp))
         {
+            publishSensorData("air/raw-temp", "temperature", temp);
+
             // Adjust temperature depending on the calibration coefficient
             temp = temp*temperatureCoef;
 
