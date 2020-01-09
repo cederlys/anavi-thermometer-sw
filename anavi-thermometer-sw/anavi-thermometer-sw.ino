@@ -967,7 +967,7 @@ bool publishSensorDiscovery(const char *config_key,
     json["device"]["identifiers"] = machineId;
     json["device"]["manufacturer"] = "ANAVI Technology";
     json["device"]["model"] = "ANAVI Thermometer";
-    json["device"]["name"] = ha_name;
+    json["device"]["name"] = String(ha_name) + " " + name_suffix;
     json["device"]["sw_version"] = ESP.getSketchMD5();
 
     JsonArray connections = json["device"].createNestedArray("connections").createNestedArray();
