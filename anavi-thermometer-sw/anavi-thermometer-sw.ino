@@ -9,6 +9,11 @@
 // #define MQTT_USERNAME "user"
 // #define MQTT_PASSWORD "password"
 
+// Server to connect to.  If defined, this overrides the setting on
+// the wifi configuration page.
+
+// #define MQTT_SERVER "example.duckdns.org"
+
 // If HOME_ASSISTANT_DISCOVERY is defined, the Anavi Thermometer will
 // publish MQTT messages that makes Home Assistant auto-discover the
 // device.  See https://www.home-assistant.io/docs/mqtt/discovery/.
@@ -460,7 +465,9 @@ void setup()
     // The extra parameters to be configured (can be either global or just in the setup)
     // After connecting, parameter.getValue() will get you the configured value
     // id/name placeholder/prompt default length
+#ifndef MQTT_SERVER
     WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, sizeof(mqtt_server));
+#endif
     WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, sizeof(mqtt_port));
     WiFiManagerParameter custom_workgroup("workgroup", "workgroup", workgroup, sizeof(workgroup));
 #ifndef MQTT_USERNAME
@@ -489,7 +496,9 @@ void setup()
     wifiManager.setSaveConfigCallback(saveConfigCallback);
 
     //add all your parameters here
+#ifndef MQTT_SERVER
     wifiManager.addParameter(&custom_mqtt_server);
+#endif
     wifiManager.addParameter(&custom_mqtt_port);
     wifiManager.addParameter(&custom_workgroup);
 #ifndef MQTT_USERNAME
@@ -543,7 +552,9 @@ void setup()
     digitalWrite(pinAlarm, LOW);
 
     //read updated parameters
+#ifndef MQTT_SERVER
     strcpy(mqtt_server, custom_mqtt_server.getValue());
+#endif
     strcpy(mqtt_port, custom_mqtt_port.getValue());
     strcpy(workgroup, custom_workgroup.getValue());
 #ifndef MQTT_USERNAME
@@ -576,8 +587,14 @@ void setup()
     bmp.begin();
 
     // MQTT
+#ifdef MQTT_SERVER
+    Serial.print("Hardcoded MQTT Server: ");
+    Serial.println(MQTT_SERVER);
+#else
     Serial.print("MQTT Server: ");
     Serial.println(mqtt_server);
+#endif
+
     Serial.print("MQTT Port: ");
     Serial.println(mqtt_port);
     // Print MQTT Username
@@ -645,7 +662,12 @@ void setup()
 #endif
 
     const int mqttPort = atoi(mqtt_port);
+#ifdef MQTT_SERVER
+    mqttClient.setServer(MQTT_SERVER, mqttPort);
+#else
     mqttClient.setServer(mqtt_server, mqttPort);
+#endif
+
     mqttClient.setCallback(mqttCallback);
 
     mqttReconnect();
