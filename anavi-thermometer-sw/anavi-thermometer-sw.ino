@@ -90,6 +90,35 @@
 // mistake.
 #undef OTA_RESET
 
+// In the ANAVI Thermometer, GPIO12 is designed to be connected to the
+// external DS18B20 waterproof temperature sensor.  If you don't need
+// that sensor, you can instead use that pin as an input pin for a
+// button.  Connect a normally-open switch between the DATA and GND of
+// the DS18B20 connector.  To avoid overloading the GPIO12 pin if you
+// accidentally use this setup with a stock firmware, I recommend
+// adding a 470 ohm resistor in series with the switch.
+//
+// Whenever the switch is pressed (so that DATA is driven low), the
+// ANAVI Thermometer will publish an MQTT message to
+// $WORKGROUP/$MACHINEID/button/1 with the value
+//
+//     { "pressed": "ON" }
+//
+// Once the button is released, a new MQTT message will be sent:
+//
+//     { "pressed": "OFF" }
+//
+// To enable this, uncomment the BUTTON_1_PIN define.  This will
+// automatically disable the OneWire code.
+//
+// #define BUTTON_1_PIN 12
+
+// If BUTTON_1_PIN is defined, this defines the minimum delay (in
+// milliseconds) between sending messages.  This serves two purposes:
+// ensure the button is debounced, and to ensure the listener have
+// time to react to the message.
+#define BUTTON_INTERVAL 250
+
 #include <ESP8266WiFi.h>          //https://github.com/esp8266/Arduino
 #include <ESP8266httpUpdate.h>
 
@@ -109,11 +138,16 @@
 // For OLED display
 #include <U8g2lib.h>
 #include <Wire.h>
+
 // For DS18B20 (waterproof) temperature sensor
-#include <OneWire.h>
-#include <DallasTemperature.h>
+#ifndef BUTTON_1_PIN
+#  include <OneWire.h>
+#  include <DallasTemperature.h>
+#endif
+
 #include "Adafruit_HTU21DF.h"
 #include "Adafruit_APDS9960.h"
+
 // For BMP180
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP085_U.h>
@@ -133,9 +167,11 @@ Adafruit_BMP085_Unified bmp = Adafruit_BMP085_Unified(10085);
 #define DHTTYPE DHT22
 DHT dht(DHTPIN, DHTTYPE);
 
+#ifndef BUTTON_1_PIN
 #define ONE_WIRE_BUS 12
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
+#endif
 
 Adafruit_HTU21DF htu = Adafruit_HTU21DF();
 
@@ -153,6 +189,11 @@ const int pinButton = 0;
 
 unsigned long sensorPreviousMillis = 0;
 const long sensorInterval = 10000;
+
+#ifdef BUTTON_1_PIN
+unsigned long buttonPreviousMillis = 0;
+unsigned int buttonState = 0;
+#endif
 
 unsigned long mqttConnectionPreviousMillis = millis();
 const long mqttConnectionInterval = 60000;
@@ -366,7 +407,11 @@ void setup()
     timeClient.begin();
     u8g2.begin();
     dht.begin();
+#ifdef BUTTON_1_PIN
+    pinMode(BUTTON_1_PIN, INPUT);
+#else
     sensors.begin();
+#endif
 
     delay(10);
 
@@ -1027,7 +1072,34 @@ void mqttReconnect()
 }
 
 #ifdef HOME_ASSISTANT_DISCOVERY
-bool publishSensorDiscovery(const char *config_key,
+// Publish an MQTT Discovery message for Home Assistant.
+//
+// Arguments:
+//
+// - component: the Home Assistant component type of the device, such
+//   as "sensor" or "binary_sensor".
+//
+// - config_key: a string that, when combined with the machineId,
+//   creates a unique name for this sensor.  Used both as the
+//   <object_id> in the discovery topic, and as part of the unique_id.
+//
+// - device_class: The device class (see
+//   <https://www.home-assistant.io/docs/configuration/customizing-devices/#device-class>).
+//   May be 0.
+//
+// - name_suffix: This will be appended to ha_name to create the
+//   human-readable name of this sensor.  Should typically be
+//   capitalized.
+//
+// - state_topic: The topic where this sensor publishes its state.
+//   The workgroup and machineId will be prepended to form the actual
+//   topic.  This should always start with a slash.
+//
+// - unit: The unit_of_measurement, or 0.
+//
+// - value_template: A template to extract a value from the payload.
+bool publishSensorDiscovery(const char *component,
+                            const char *config_key,
                             const char *device_class,
                             const char *name_suffix,
                             const char *state_topic,
@@ -1037,14 +1109,16 @@ bool publishSensorDiscovery(const char *config_key,
     static char topic[48 + sizeof(machineId)];
 
     snprintf(topic, sizeof(topic),
-             "homeassistant/sensor/%s/%s/config", machineId, config_key);
+             "homeassistant/%s/%s/%s/config", component, machineId, config_key);
 
     DynamicJsonDocument json(1024);
-    json["device_class"] = device_class;
+    if (device_class)
+        json["device_class"] = device_class;
     json["name"] = String(ha_name) + " " + name_suffix;
     json["unique_id"] = String("anavi-") + machineId + "-" + config_key;
     json["state_topic"] = String(workgroup) + "/" + machineId + state_topic;
-    json["unit_of_measurement"] = unit;
+    if (unit)
+        json["unit_of_measurement"] = unit;
     json["value_template"] = value_template;
 
     json["device"]["identifiers"] = machineId;
@@ -1093,29 +1167,42 @@ void publishState()
 
 #ifdef HOME_ASSISTANT_DISCOVERY
     String homeAssistantTempScale = (true == configTempCelsius) ? "°C" : "°F";
-    publishSensorDiscovery("temp",
+    publishSensorDiscovery("sensor",
+                           "temp",
                            "temperature",
                            "Temperature",
                            "/air/temperature",
                            homeAssistantTempScale.c_str(),
                            "{{ value_json.temperature | round(1) }}");
 
-    publishSensorDiscovery("humidity",
+    publishSensorDiscovery("sensor",
+                           "humidity",
                            "humidity",
                            "Humidity",
                            "/air/humidity",
                            "%",
                            "{{ value_json.humidity | round(0) }}");
 
+#  ifdef BUTTON_1_PIN
+    publishSensorDiscovery("binary_sensor",
+                           "button",
+                           0,
+                           "Button 1",
+                           "/button/1",
+                           0,
+                           "{{ value_json.pressed }}");
+#  else
     if (0 < sensors.getDeviceCount())
     {
-        publishSensorDiscovery("watertemp",
+        publishSensorDiscovery("sensor",
+                               "watertemp",
                                "temperature",
                                "Water Temp",
                                "/water/temperature",
                                "°C",
                                "{{ value_json.temperature }}");
     }
+#  endif
 #endif
 }
 
@@ -1337,6 +1424,27 @@ void loop()
     }
 
     const unsigned long currentMillis = millis();
+
+    // Handle button presses at a shorter interval
+#ifdef BUTTON_1_PIN
+    if (BUTTON_INTERVAL <= (currentMillis - buttonPreviousMillis))
+    {
+        bool currentState = digitalRead(BUTTON_1_PIN);
+        if (currentState)
+            Serial.println("up");
+        else
+            Serial.println("down");
+
+        if (buttonState != currentState)
+        {
+            buttonState = currentState;
+            publishSensorData("button/1", "pressed",
+                              currentState ? "OFF" : "ON");
+            buttonPreviousMillis = currentMillis;
+        }
+    }
+#endif
+
     if (sensorInterval <= (currentMillis - sensorPreviousMillis))
     {
         sensorPreviousMillis = currentMillis;
@@ -1373,6 +1481,9 @@ void loop()
         long rssiValue = WiFi.RSSI();
         String rssi = "WiFi " + String(rssiValue) + " dBm";
         Serial.println(rssi);
+        sensor_line3 = "";
+
+#ifndef BUTTON_1_PIN
         if (0 < sensors.getDeviceCount())
         {
             sensors.requestTemperatures();
@@ -1383,7 +1494,9 @@ void loop()
             sensor_line3 = "Water " + formatTemperature(dsTemperature);
             Serial.println(sensor_line3);
         }
-        else
+#endif
+
+        if (sensor_line3.length() == 0)
         {
             static int select = 0;
             switch (++select%2) {
