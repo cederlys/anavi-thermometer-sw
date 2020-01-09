@@ -88,6 +88,9 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP085_U.h>
 
+bool retained_discovery = true;
+bool retained_state = true;
+bool retained_sensor_values = false;
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP);
@@ -923,7 +926,7 @@ bool publishSensorDiscovery(const char *config_key,
     Serial.println(topic);
 
     int payload_len = measureJson(json);
-    if (!mqttClient.beginPublish(topic, payload_len, true))
+    if (!mqttClient.beginPublish(topic, payload_len, retained_discovery))
     {
         Serial.println("beginPublish failed!\n");
         return false;
@@ -949,9 +952,9 @@ void publishState()
 {
     static char payload[80];
     snprintf(payload, sizeof(payload), "%f", temperatureCoef);
-    mqttClient.publish(stat_temp_coefficient_topic, payload, true);
+    mqttClient.publish(stat_temp_coefficient_topic, payload, retained_state);
     snprintf(payload, sizeof(payload), "%f", dsTemperatureCoef);
-    mqttClient.publish(stat_ds_temp_coefficient_topic, payload, true);
+    mqttClient.publish(stat_ds_temp_coefficient_topic, payload, retained_state);
 
 #ifdef HOME_ASSISTANT_DISCOVERY
     String homeAssistantTempScale = (true == configTempCelsius) ? "°C" : "°F";
@@ -989,7 +992,7 @@ void publishSensorData(const char* subTopic, const char* key, const float value)
     serializeJson(json, payload);
     char topic[200];
     sprintf(topic,"%s/%s/%s", workgroup, machineId, subTopic);
-    mqttClient.publish(topic, payload, true);
+    mqttClient.publish(topic, payload, retained_sensor_values);
 }
 
 void publishSensorData(const char* subTopic, const char* key, const String& value)
@@ -1000,7 +1003,7 @@ void publishSensorData(const char* subTopic, const char* key, const String& valu
     serializeJson(json, payload);
     char topic[200];
     sprintf(topic,"%s/%s/%s", workgroup, machineId, subTopic);
-    mqttClient.publish(topic, payload, true);
+    mqttClient.publish(topic, payload, retained_sensor_values);
 }
 
 bool isSensorAvailable(int sensorAddress)
