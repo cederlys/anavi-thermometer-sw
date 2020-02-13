@@ -1464,11 +1464,12 @@ void publishSensorData(const char* subTopic, const char* key, const String& valu
     mqttClient.publish(topic, payload, true);
 }
 
-void publishSensorNonData(const char* subTopic)
+void publishSensorNullData(const char* subTopic, const char *key)
 {
     char topic[200];
     sprintf(topic,"%s/%s/%s", workgroup, machineId, subTopic);
-    mqttClient.publish(topic, "", true);
+    String value = String("{\"") + key + "\": null}";
+    mqttClient.publish(topic, value.c_str(), true);
 }
 
 bool isSensorAvailable(int sensorAddress)
@@ -1794,9 +1795,9 @@ void loop()
         }
         else
         {
-            publishSensorNonData("air/temperature");
-            publishSensorNonData("air/humidity");
-            publishSensorNonData("air/heatindex");
+            publishSensorNullData("air/temperature", "temperature");
+            publishSensorNullData("air/humidity", "humidity");
+            publishSensorNullData("air/heatindex", "heatindex");
         }
 
         setDefaultSensorLines();
