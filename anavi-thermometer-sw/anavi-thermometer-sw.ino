@@ -1464,6 +1464,13 @@ void publishSensorData(const char* subTopic, const char* key, const String& valu
     mqttClient.publish(topic, payload, true);
 }
 
+void publishSensorNonData(const char* subTopic)
+{
+    char topic[200];
+    sprintf(topic,"%s/%s/%s", workgroup, machineId, subTopic);
+    mqttClient.publish(topic, "", true);
+}
+
 bool isSensorAvailable(int sensorAddress)
 {
     // Check if I2C sensor is present
@@ -1785,6 +1792,13 @@ void loop()
             publishSensorData("air/heatindex", "heatindex", convertTemperature(dhtHeatIndex));
             Serial.println("DHT Heat Index: " + formatTemperature(dhtHeatIndex));
         }
+        else
+        {
+            publishSensorNonData("air/temperature");
+            publishSensorNonData("air/humidity");
+            publishSensorNonData("air/heatindex");
+        }
+
         setDefaultSensorLines();
 
         long rssiValue = WiFi.RSSI();
