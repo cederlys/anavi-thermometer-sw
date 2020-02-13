@@ -325,6 +325,8 @@ bool need_redraw = false;
 char stat_temp_coefficient_topic[14 + sizeof(machineId)];
 char stat_ds_temp_coefficient_topic[20 + sizeof(machineId)];
 
+String availability_topic;
+
 struct Uptime
 {
     // d, h, m, s and ms record the current uptime.
@@ -637,6 +639,8 @@ void setup()
         Serial.println("failed to mount FS");
     }
     //end read
+
+    availability_topic = String(workgroup) + "/" + machineId + "/status";
 
     // Set MQTT topics
     sprintf(line1_topic, "cmnd/%s/line1", machineId);
@@ -1210,7 +1214,9 @@ void mqttReconnect()
         Serial.print("Attempting MQTT connection...");
         // Attempt to connect
         if (true == mqttClient.connect(clientId,
-                                       mqtt_username(), mqtt_password()))
+                                       mqtt_username(), mqtt_password(),
+                                       availability_topic.c_str(),
+                                       0, 1, "offline"))
         {
             Serial.println("connected");
 
@@ -1294,6 +1300,7 @@ bool publishSensorDiscovery(const char *component,
     if (unit)
         json["unit_of_measurement"] = unit;
     json["value_template"] = value_template;
+    json["availability_topic"] = availability_topic;
 
     json["device"]["identifiers"] = machineId;
     json["device"]["manufacturer"] = "ANAVI Technology";
@@ -1338,6 +1345,7 @@ void publishState()
     mqttClient.publish(stat_temp_coefficient_topic, payload, true);
     snprintf(payload, sizeof(payload), "%f", dsTemperatureCoef);
     mqttClient.publish(stat_ds_temp_coefficient_topic, payload, true);
+    mqttClient.publish(availability_topic.c_str(), "online", true);
 
 #ifdef HOME_ASSISTANT_DISCOVERY
     String homeAssistantTempScale = (true == configTempCelsius) ? "°C" : "°F";
