@@ -326,6 +326,7 @@ char stat_temp_coefficient_topic[14 + sizeof(machineId)];
 char stat_ds_temp_coefficient_topic[20 + sizeof(machineId)];
 
 String availability_topic;
+String availability_topic_dht22;
 
 struct Uptime
 {
@@ -641,6 +642,8 @@ void setup()
     //end read
 
     availability_topic = String(workgroup) + "/" + machineId + "/status";
+    availability_topic_dht22 = String(workgroup) + "/" + machineId
+        + "/dht22status";
 
     // Set MQTT topics
     sprintf(line1_topic, "cmnd/%s/line1", machineId);
@@ -1284,7 +1287,8 @@ bool publishSensorDiscovery(const char *component,
                             const char *name_suffix,
                             const char *state_topic,
                             const char *unit,
-                            const char *value_template)
+                            const char *value_template,
+                            bool is_dht22 = false)
 {
     static char topic[48 + sizeof(machineId)];
 
@@ -1300,7 +1304,10 @@ bool publishSensorDiscovery(const char *component,
     if (unit)
         json["unit_of_measurement"] = unit;
     json["value_template"] = value_template;
-    json["availability_topic"] = availability_topic;
+    if (is_dht22)
+        json["availability_topic"] = availability_topic_dht22;
+    else
+        json["availability_topic"] = availability_topic;
 
     json["device"]["identifiers"] = machineId;
     json["device"]["manufacturer"] = "ANAVI Technology";
@@ -1355,7 +1362,8 @@ void publishState()
                            "Temperature",
                            "/air/temperature",
                            homeAssistantTempScale.c_str(),
-                           "{{ value_json.temperature | round(1) }}");
+                           "{{ value_json.temperature | round(1) }}",
+                           true);
 
     publishSensorDiscovery("sensor",
                            "humidity",
@@ -1363,7 +1371,8 @@ void publishState()
                            "Humidity",
                            "/air/humidity",
                            "%",
-                           "{{ value_json.humidity }}");
+                           "{{ value_json.humidity }}",
+                           true);
 
     if (haveButton)
     {
@@ -1462,14 +1471,6 @@ void publishSensorData(const char* subTopic, const char* key, const String& valu
     char topic[200];
     sprintf(topic,"%s/%s/%s", workgroup, machineId, subTopic);
     mqttClient.publish(topic, payload, true);
-}
-
-void publishSensorNullData(const char* subTopic, const char *key)
-{
-    char topic[200];
-    sprintf(topic,"%s/%s/%s", workgroup, machineId, subTopic);
-    String value = String("{\"") + key + "\": null}";
-    mqttClient.publish(topic, value.c_str(), true);
 }
 
 bool isSensorAvailable(int sensorAddress)
@@ -1792,12 +1793,14 @@ void loop()
             float dhtHeatIndex = dht.computeHeatIndex(dhtTemperature, dhtHumidity, false);
             publishSensorData("air/heatindex", "heatindex", convertTemperature(dhtHeatIndex));
             Serial.println("DHT Heat Index: " + formatTemperature(dhtHeatIndex));
+
+            mqttClient.publish(availability_topic_dht22.c_str(), "online",
+                               true);
         }
         else
         {
-            publishSensorNullData("air/temperature", "temperature");
-            publishSensorNullData("air/humidity", "humidity");
-            publishSensorNullData("air/heatindex", "heatindex");
+            mqttClient.publish(availability_topic_dht22.c_str(), "offline",
+                               true);
         }
 
         setDefaultSensorLines();
