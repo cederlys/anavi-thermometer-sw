@@ -289,6 +289,8 @@ bool shouldSaveConfig = false;
 // MQTT
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
+WiFiClient espClientDHT22;
+PubSubClient mqttClientDHT22(espClientDHT22);
 
 #ifdef OTA_UPGRADES
 char cmnd_update_topic[12 + sizeof(machineId)];
@@ -868,8 +870,10 @@ void setup()
     const int mqttPort = atoi(mqtt_port);
 #ifdef MQTT_SERVER
     mqttClient.setServer(MQTT_SERVER, mqttPort);
+    mqttClientDHT22.setServer(MQTT_SERVER, mqttPort);
 #else
     mqttClient.setServer(mqtt_server, mqttPort);
+    mqttClientDHT22.setServer(mqtt_server, mqttPort);
 #endif
 
     mqttClient.setCallback(mqttCallback);
@@ -1209,14 +1213,34 @@ const char *mqtt_password()
 void mqttReconnect()
 {
     char clientId[18 + sizeof(machineId)];
-    snprintf(clientId, sizeof(clientId), "anavi-thermometer-%s", machineId);
 
     // Loop until we're reconnected
     for (int attempt = 0; attempt < 3; ++attempt)
     {
         Serial.print("Attempting MQTT connection...");
         // Attempt to connect
-        if (true == mqttClient.connect(clientId,
+        snprintf(clientId, sizeof(clientId), "anavi-thermo-dht-%s", machineId);
+        if (false == mqttClientDHT22.connected())
+        {
+            if (true == mqttClientDHT22.connect(
+                    clientId,
+                    mqtt_username(), mqtt_password(),
+                    availability_topic_dht22.c_str(),
+                    0, 1, "offline"))
+            {
+                Serial.print("DHT22 connected...");
+            }
+            else
+            {
+                Serial.print("failed, rc=");
+                Serial.print(mqttClientDHT22.state());
+            }
+        }
+
+        snprintf(clientId, sizeof(clientId), "anavi-thermometer-%s", machineId);
+        if (true == mqttClientDHT22.connected() &&
+            false == mqttClient.connected() &&
+            true == mqttClient.connect(clientId,
                                        mqtt_username(), mqtt_password(),
                                        availability_topic.c_str(),
                                        0, 1, "offline"))
@@ -1240,17 +1264,17 @@ void mqttReconnect()
             mqttClient.subscribe(cmnd_slp_topic);
             mqttClient.subscribe(cmnd_altitude_topic);
             publishState();
-            break;
-
+            return;
         }
         else
         {
             Serial.print("failed, rc=");
             Serial.print(mqttClient.state());
-            Serial.println(" try again in 5 seconds");
-            // Wait 5 seconds before retrying
-            delay(5000);
         }
+
+        Serial.println(" try again in 5 seconds");
+        // Wait 5 seconds before retrying
+        delay(5000);
     }
 }
 
@@ -1730,10 +1754,13 @@ void loop()
 
     // put your main code here, to run repeatedly:
     mqttClient.loop();
+    mqttClientDHT22.loop();
 
     // Reconnect if there is an issue with the MQTT connection
     const unsigned long mqttConnectionMillis = millis();
-    if ( (false == mqttClient.connected()) && (mqttConnectionInterval <= (mqttConnectionMillis - mqttConnectionPreviousMillis)) )
+    if ( (false == mqttClient.connected() ||
+          false == mqttClientDHT22.connected())
+         && (mqttConnectionInterval <= (mqttConnectionMillis - mqttConnectionPreviousMillis)) )
     {
         mqttConnectionPreviousMillis = mqttConnectionMillis;
         mqttReconnect();
