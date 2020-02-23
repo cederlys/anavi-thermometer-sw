@@ -73,6 +73,51 @@
 // This hack will likely increase the power consumption slightly.
 // #define ESP12_BLUE_LED_ALWAYS_ON
 
+// Normally, the ANAVI Thermometer uses one MQTT status topic per
+// sensor, plus one for the board itself.  For example, the built-in
+// DHT22 sensor can reports its status as "online" or "offline" via
+// the "<workgroup>/<machineid>/status/dht22" topic.  This means that
+// individual sensors can report their status, and in many ways
+// provides the best experience.
+//
+// See MQTTName below for a list of status topics.
+//
+// However, if USE_MULTIPLE_MQTT isn't defined (see below), the ANAVI
+// Thermometer will only be able to set up a single MQTT Last Will and
+// Testament (often referred to as "LWT" or "will").  That means that
+// if the connection is broken, only the
+// <workgroup>/<machineid>/status/esp8266 topic will be set to
+// "offline".  You can fix this by having a Home Assistant automation
+// that listens to that topic, and sets all the other status topics
+// for the ANAVI Thermometer to offline when esp8266 goes offline.
+//
+// Alternatively, you can comment out USE_MULTIPLE_STATUS_TOPICS.
+// Then all the MQTT Discovery messages for all the sensors will use
+// the esp8266 status topic as their availability topic.  This may be
+// a decent compromise if you can't set up an external automation and
+// don't want to (or can't) define USE_MULTIPLE_MQTT.
+#define USE_MULTIPLE_STATUS_TOPICS
+
+// The ANAVI Thermometer can be configured to opens several MQTT
+// connections to the MQTT broker, so that it can reliably set up LWTs
+// for all the status topics.  (This is only relevant if
+// USE_MULTIPLE_STATUS_TOPICS is defined).  See MQTTName below for a
+// full list of connections it may potentially open.  If you don't
+// connect any external sensors, it will only open two connections
+// (for the DHT22 and the board itself).  Each new sensor you add will
+// typically add once more MQTT connection.
+//
+// These MQTT connections use a small amount of heap memory on the
+// ANAVI Thermometer, and they also cause some additional network load
+// and load on the MQTT broker, so they are disabled by default.  By
+// uncommenting the following line, you can enable multiple MQTT
+// connections.
+// #define USE_MULTIPLE_MQTT
+
+#if defined(USE_MULTIPLE_MQTT) && !defined(USE_MULTIPLE_STATUS_TOPICS)
+#  error USE_MULTIPLE_MQTT without USE_MULTIPLE_STATUS_TOPICS is not supported
+#endif
+
 // In the ANAVI Thermometer, GPIO12 is designed to be connected to the
 // external DS18B20 waterproof temperature sensor using a 1-Wire bus.
 // If you don't connect any 1-Wire sensor, you can instead use that
@@ -299,15 +344,45 @@ enum MQTTName {
     MQTT_HTU21D,
     MQTT_APDS9960,
     MQTT_BUTTON,
+#ifdef USE_MULTIPLE_MQTT
     MQTT_LAST,
+#else
+    MQTT_LAST_STATUS,
+#  define MQTT_LAST 1
+#endif
 };
 
 class MQTTConnection;
+
+#ifndef USE_MULTIPLE_MQTT
+void call_mqtt_connect_cbs(MQTTConnection *conn);
+#endif
 
 struct MQTTSpec {
     MQTTName name;
     const char *topic;
     void (*connect_cb)(MQTTConnection *);
+    bool ever_online;           // Not used in USE_MULTIPLE_MQTT mode.
+};
+
+class MQTTStatus
+{
+public:
+    String availability_topic;
+    MQTTStatus *status_list;
+    MQTTConnection *conn;
+
+    MQTTStatus();
+    void set_spec(const MQTTSpec *spec);
+    void online(bool board = false);
+    void offline();
+    const char *topic;
+    void (*connect_cb)(MQTTConnection *);
+    void publish_online(bool force_update);
+
+protected:
+    bool is_online;
+    bool last_online;
 };
 
 class MQTTConnection
@@ -317,38 +392,85 @@ public:
     PubSubClient mqttClient;
 
     bool requested;
-    String availability_topic;
 
     MQTTConnection();
     void set_spec(const MQTTSpec *spec);
     void connect();
     void reconnect();
-    void online();
-    void offline();
+    MQTTStatus *status_list;
 protected:
-    const char *topic;
-    void (*connect_cb)(MQTTConnection *);
     String client_id;
-    void publish_online(bool force_update);
-    bool is_online;
-    bool last_online;
 };
 
-MQTTConnection::MQTTConnection()
-    : espClient(), mqttClient(espClient), requested(false), topic(0),
+MQTTStatus::MQTTStatus()
+    : status_list(0), topic(0), connect_cb(0),
       is_online(false), last_online(false)
+{
+}
+
+void MQTTStatus::set_spec(const MQTTSpec *spec)
+{
+    topic = spec->topic;
+    connect_cb = spec->connect_cb;
+    availability_topic = String(workgroup) + "/" + machineId + "/"
+        + "status" + "/" + topic;
+}
+
+void MQTTStatus::online(bool board)
+{
+#ifndef USE_MULTIPLE_STATUS_TOPICS
+    // If we use a single MQTT status topic, all the status indicators
+    // except for the board itself (MQTT_ESP8266) are disabled.  For
+    // simplicity, the online() notification for MQTT_ESP8266 also
+    // specifies the board argument.
+
+    if (!board)
+        return;
+#endif
+
+    is_online = true;
+
+    if (!conn->requested)
+        conn->connect();
+
+    publish_online(false);
+}
+
+void MQTTStatus::offline()
+{
+#ifdef USE_MULTIPLE_STATUS_TOPICS
+
+    is_online = false;
+    if (conn->requested)
+        publish_online(false);
+
+# else
+
+    // If we use a single MQTT status topic, we never publish offline
+    // messages.  The offline message is only sent as a result of the
+    // MQTT will.  So we don't need to do anything here.
+
+#endif
+}
+
+void MQTTStatus::publish_online(bool force_update)
+{
+    if (is_online != last_online || force_update)
+    {
+        conn->mqttClient.publish(availability_topic.c_str(),
+                                 is_online ? "online" : "offline", true);
+        last_online = is_online;
+    }
+}
+
+MQTTConnection::MQTTConnection()
+    : espClient(), mqttClient(espClient), requested(false)
 {
 }
 
 void MQTTConnection::set_spec(const MQTTSpec *spec)
 {
-    topic = spec->topic;
-    connect_cb = spec->connect_cb;
-    client_id = String("anavi-thermometer-") + machineId;
-    if (strlen(topic) > 0)
-        client_id += String("-") + topic;
-    availability_topic = String(workgroup) + "/" + machineId + "/"
-        + "status" + "/" + topic;
+    client_id = String("anavi-thermometer-") + machineId + "-" + spec->topic;
 }
 
 void MQTTConnection::connect()
@@ -363,20 +485,31 @@ void MQTTConnection::reconnect()
         return;
 
     Serial.print("MQTT ");
-    if (strlen(topic) > 0)
-    {
-        Serial.print(topic);
-        Serial.print(" ");
-    }
+    Serial.print(status_list->topic);
+    Serial.print(" ");
 
     if (mqttClient.connect(client_id.c_str(),
                            mqtt_username(), mqtt_password(),
-                           availability_topic.c_str(),
+                           status_list->availability_topic.c_str(),
                            0, 1, "offline"))
     {
         Serial.println("connection established.");
-        (*connect_cb)(this);
-        publish_online(true);
+
+#if defined(USE_MULTIPLE_MQTT)
+        (*status_list->connect_cb)(this);
+        status_list->publish_online(true);
+#elif defined(USE_MULTIPLE_STATUS_TOPICS)
+        MQTTStatus *status = status_list;
+        while (status != NULL)
+        {
+            (*status->connect_cb)(this);
+            status->publish_online(true);
+            status = status->status_list;
+        }
+#else
+        call_mqtt_connect_cbs(this);
+        status_list->publish_online(true);
+#endif
     }
     else
     {
@@ -385,45 +518,42 @@ void MQTTConnection::reconnect()
     }
 }
 
-
-void MQTTConnection::online()
-{
-    is_online = true;
-
-    if (!requested)
-        connect();
-
-    publish_online(false);
-}
-
-void MQTTConnection::offline()
-{
-    is_online = false;
-    if (requested)
-        publish_online(false);
-}
-
-void MQTTConnection::publish_online(bool force_update)
-{
-    if (is_online != last_online || force_update)
-    {
-        mqttClient.publish(availability_topic.c_str(),
-                           is_online ? "online" : "offline", true);
-        last_online = is_online;
-    }
-}
-
 MQTTConnection mqtt_connections[MQTT_LAST];
 
+#if defined(USE_MULTIPLE_MQTT) == defined(USE_MULTIPLE_STATUS_TOPICS)
+MQTTStatus mqtt_statuses[MQTT_LAST];
+#else
+MQTTStatus mqtt_statuses[MQTT_LAST_STATUS];
+#endif
+
+#ifdef USE_MULTIPLE_MQTT
 MQTTConnection *mqtt(MQTTName name)
 {
     return &mqtt_connections[name];
 }
+#else
+MQTTConnection *mqtt(MQTTName name)
+{
+    return &mqtt_connections[0];
+}
+#endif
 
 PubSubClient *mqtt_client(MQTTName name)
 {
     return &mqtt(name)->mqttClient;
 }
+
+#ifdef USE_MULTIPLE_STATUS_TOPICS
+MQTTStatus *mqtt_status(MQTTName name)
+{
+    return &mqtt_statuses[name];
+}
+#else
+MQTTStatus *mqtt_status(MQTTName name)
+{
+    return &mqtt_statuses[0];
+}
+#endif
 
 #ifdef OTA_UPGRADES
 char cmnd_update_topic[12 + sizeof(machineId)];
@@ -612,18 +742,27 @@ void mqtt_button_connected(MQTTConnection *c)
 
 // The order must match the enum MQTTName.
 struct MQTTSpec mqtt_specs[] = {
-    {MQTT_ESP8266,  "esp8266",  mqtt_esp8266_connected},
-
-#ifdef USE_MULTIPLE_MQTT
-    {MQTT_DHT22,    "dht22",    mqtt_dht22_connected},
-    {MQTT_DS18B20,  "ds18b20",  mqtt_ds18b20_connected},
-    {MQTT_BMP180,   "bmp180",   mqtt_bmp180_connected},
-    {MQTT_BH1750,   "bh1750",   mqtt_bh1750_connected},
-    {MQTT_HTU21D,   "htu21d",   mqtt_htu21d_connected},
-    {MQTT_APDS9960, "apds9960", mqtt_apds9960_connected},
-    {MQTT_BUTTON,   "button",   mqtt_button_connected},
-#endif
+    {MQTT_ESP8266,  "esp8266",  mqtt_esp8266_connected,  false},
+    {MQTT_DHT22,    "dht22",    mqtt_dht22_connected,    false},
+    {MQTT_DS18B20,  "ds18b20",  mqtt_ds18b20_connected,  false},
+    {MQTT_BMP180,   "bmp180",   mqtt_bmp180_connected,   false},
+    {MQTT_BH1750,   "bh1750",   mqtt_bh1750_connected,   false},
+    {MQTT_HTU21D,   "htu21d",   mqtt_htu21d_connected,   false},
+    {MQTT_APDS9960, "apds9960", mqtt_apds9960_connected, false},
+    {MQTT_BUTTON,   "button",   mqtt_button_connected,   false},
+    {MQTT_ESP8266, 0, 0, false}, // Sentinel used by call_mqtt_connect_cbs()
 };
+
+#ifndef USE_MULTIPLE_MQTT
+void call_mqtt_connect_cbs(MQTTConnection *conn)
+{
+    for (MQTTSpec *spec = mqtt_specs; spec->topic != 0; spec++)
+    {
+        if (spec->ever_online)
+            (*spec->connect_cb)(conn);
+    }
+}
+#endif
 
 //callback notifying us of the need to save config
 void saveConfigCallback ()
@@ -800,6 +939,20 @@ void nice_restart()
     // happens.
     while (1)
         ;
+}
+
+void mqtt_online(MQTTName name, bool board = false)
+{
+    mqtt_status(name)->online(board);
+
+#ifndef USE_MULTIPLE_STATUS_TOPICS
+    MQTTSpec *spec = &mqtt_specs[name];
+    if (!spec->ever_online)
+    {
+        (*spec->connect_cb)(mqtt(name));
+        spec->ever_online = true;
+    }
+#endif
 }
 
 void setup()
@@ -1142,7 +1295,7 @@ void setup()
 
     setup_mqtt(mqtt_server, mqtt_port);
 
-    mqtt(MQTT_ESP8266)->online();
+    mqtt_online(MQTT_ESP8266, true);
 
     Serial.println("");
     Serial.println("-----");
@@ -1157,6 +1310,7 @@ void setup()
 void setup_mqtt(const char *mqtt_server, const char *mqtt_port)
 {
     const int mqttPort = atoi(mqtt_port);
+    MQTTStatus *last_status;
 
     for (int n = 0; n < MQTT_LAST; n++)
     {
@@ -1169,7 +1323,11 @@ void setup_mqtt(const char *mqtt_server, const char *mqtt_port)
         }
 
         mqtt_connections[n].set_spec(&mqtt_specs[n]);
+        mqtt_statuses[n].set_spec(&mqtt_specs[n]);
         mqtt_connections[n].mqttClient.setCallback(mqttCallback);
+        mqtt_connections[n].status_list = &mqtt_statuses[n];
+        mqtt_statuses[n].conn = &mqtt_connections[n];
+        last_status = &mqtt_statuses[n];
 
 #ifdef MQTT_SERVER
         mqtt_connections[n].mqttClient.setServer(MQTT_SERVER, mqttPort);
@@ -1177,6 +1335,15 @@ void setup_mqtt(const char *mqtt_server, const char *mqtt_port)
         mqtt_connections[n].mqttClient.setServer(mqtt_server, mqttPort);
 #endif
     }
+
+#if defined(USE_MULTIPLE_STATUS_TOPICS) && !defined(USE_MULTIPLE_MQTT)
+    for (int n = 1; mqtt_specs[n]->topic != 0; n++)
+    {
+        mqtt_statuses[n].conn = mqtt_connections[0];
+        last_status->status_list = &mqtt_statuses[n];
+        last_status = &mqtt_statuses[n];
+    }
+#endif
 }
 
 void setupADPS9960()
@@ -1555,7 +1722,7 @@ bool publishSensorDiscovery(const char *component,
     if (unit)
         json["unit_of_measurement"] = unit;
     json["value_template"] = value_template;
-    json["availability_topic"] = mqtt(mqtt_name)->availability_topic;
+    json["availability_topic"] = mqtt_status(mqtt_name)->availability_topic;
 
     json["device"]["identifiers"] = machineId;
     json["device"]["manufacturer"] = "ANAVI Technology";
@@ -1670,7 +1837,7 @@ bool isSensorAvailable(int sensorAddress)
 
 void handleHTU21D()
 {
-    mqtt(MQTT_HTU21D)->online();
+    mqtt_online(MQTT_HTU21D);
 
     // Check if temperature has changed
     const float tempTemperature = htu.readTemperature();
@@ -1710,7 +1877,7 @@ void sensorWriteData(int i2cAddress, uint8_t data)
 
 void handleBH1750()
 {
-    mqtt(MQTT_BH1750)->online();
+    mqtt_online(MQTT_BH1750);
 
     //Wire.begin();
     // Power on sensor
@@ -1742,7 +1909,7 @@ void handleBH1750()
 
 void detectGesture()
 {
-    mqtt(MQTT_APDS9960)->online();
+    mqtt_online(MQTT_APDS9960);
 
     //read a gesture from the device
     const uint8_t gestureCode = apds.readGesture();
@@ -1780,10 +1947,10 @@ void handleBMP()
   if (!event.pressure)
   {
     // BMP180 sensor error
-    mqtt(MQTT_BMP180)->offline();
+    mqtt_status(MQTT_BMP180)->offline();
     return;
   }
-  mqtt(MQTT_BMP180)->online();
+  mqtt_online(MQTT_BMP180);
   Serial.print("BMP180 Pressure: ");
   Serial.print(event.pressure);
   Serial.println(" hPa");
@@ -1826,7 +1993,7 @@ void handleSensors()
     }
     else
     {
-        mqtt(MQTT_HTU21D)->offline();
+        mqtt_status(MQTT_HTU21D)->offline();
     }
 
     if (isSensorAvailable(sensorBH1750))
@@ -1835,7 +2002,7 @@ void handleSensors()
     }
     else
     {
-        mqtt(MQTT_BH1750)->offline();
+        mqtt_status(MQTT_BH1750)->offline();
     }
 
     if (isSensorAvailable(sensorBMP180))
@@ -1844,7 +2011,7 @@ void handleSensors()
     }
     else
     {
-        mqtt(MQTT_BMP180)->offline();
+        mqtt_status(MQTT_BMP180)->offline();
     }
 }
 
@@ -1958,7 +2125,7 @@ void loop()
     }
     else
     {
-        mqtt(MQTT_APDS9960)->offline();
+        mqtt_status(MQTT_APDS9960)->offline();
     }
 
     const unsigned long currentMillis = millis();
@@ -1966,7 +2133,7 @@ void loop()
     // Handle button presses at a shorter interval
     if (haveButton && BUTTON_INTERVAL <= (currentMillis - buttonPreviousMillis))
     {
-        mqtt(MQTT_BUTTON)->online();
+        mqtt_online(MQTT_BUTTON);
 
         bool currentState = digitalRead(ONE_WIRE_BUS);
 
@@ -1999,7 +2166,7 @@ void loop()
 
         if (!isnan(humidity) && !isnan(temp))
         {
-            mqtt(MQTT_DHT22)->online();
+            mqtt_online(MQTT_DHT22);
 
             // Adjust temperature depending on the calibration coefficient
             temp = temp*temperatureCoef;
@@ -2018,7 +2185,7 @@ void loop()
         }
         else
         {
-            mqtt(MQTT_DHT22)->offline();
+            mqtt_status(MQTT_DHT22)->offline();
         }
 
         setDefaultSensorLines();
@@ -2033,13 +2200,13 @@ void loop()
         }
         else if (0 < sensors.getDeviceCount())
         {
-            mqtt(MQTT_DS18B20)->online();
+            mqtt_online(MQTT_DS18B20);
             sensors.requestTemperatures();
             float wtemp = sensors.getTempCByIndex(0);
             if (wtemp == DEVICE_DISCONNECTED_C)
             {
                 Serial.println("Lost contact with DS18B20");
-                mqtt(MQTT_DS18B20)->offline();
+                mqtt_status(MQTT_DS18B20)->offline();
                 sensors.begin(); // This will update getDeviceCount.
             }
             else
@@ -2055,7 +2222,7 @@ void loop()
         }
         else
         {
-            mqtt(MQTT_DS18B20)->offline();
+            mqtt_status(MQTT_DS18B20)->offline();
 
             static int select = 0;
             switch (++select%2) {
